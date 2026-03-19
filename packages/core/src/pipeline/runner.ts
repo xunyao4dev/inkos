@@ -6,7 +6,7 @@ import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel, LLMConfig, AgentLLMOverride } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent } from "../agents/architect.js";
-import { WriterAgent } from "../agents/writer.js";
+import { WriterAgent, type WriteChapterOutput } from "../agents/writer.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
 import { ReviserAgent, type ReviseMode } from "../agents/reviser.js";
@@ -601,7 +601,7 @@ export class PipelineRunner {
         const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
         const reviseOutput = await reviser.reviseChapter(
           bookDir,
-          output.content,
+          finalContent,
           chapterNumber,
           auditResult.issues,
           "spot-fix",
@@ -611,7 +611,7 @@ export class PipelineRunner {
 
         if (reviseOutput.revisedContent.length > 0) {
           // Guard: reject revision if AI markers increased
-          const preMarkers = analyzeAITells(output.content);
+          const preMarkers = analyzeAITells(finalContent);
           const postMarkers = analyzeAITells(reviseOutput.revisedContent);
           const preCount = preMarkers.issues.length;
           const postCount = postMarkers.issues.length;
@@ -641,52 +641,30 @@ export class PipelineRunner {
             issues: [...reAudit.issues, ...reAITells.issues, ...reSensitive.issues],
             summary: reAudit.summary,
           };
-
-          // Update state files from revision
-          const storyDir = join(bookDir, "story");
-          if (reviseOutput.updatedState !== "(状态卡未更新)") {
-            await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
-          }
-          if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
-            await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
-          }
-          if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
-            await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
-          }
         }
       }
     }
 
-    // 4. Save chapter (original or revised)
-    const chaptersDir = join(bookDir, "chapters");
-    const paddedNum = String(chapterNumber).padStart(4, "0");
-    const title = output.title;
-    const filename = `${paddedNum}_${title.replace(/[/\\?%*:|"<>]/g, "").replace(/\s+/g, "_").slice(0, 50)}.md`;
-
-    const pipelineLang = book.language ?? gp.language;
-    const pipelineHeading = pipelineLang === "en"
-      ? `# Chapter ${chapterNumber}: ${title}`
-      : `# 第${chapterNumber}章 ${title}`;
-    await writeFile(
-      join(chaptersDir, filename),
-      `${pipelineHeading}\n\n${finalContent}`,
-      "utf-8",
+    // 4. Save the final chapter and truth files from a single persistence source
+    const persistenceOutput = await this.buildPersistenceOutput(
+      bookId,
+      book,
+      bookDir,
+      chapterNumber,
+      output,
+      finalContent,
     );
-
-    // Save original state files if not revised
-    if (!revised) {
-      await writer.saveChapter(bookDir, output, gp.numericalSystem, pipelineLang);
-    }
-
-    // Save new truth files (summaries, subplots, emotional arcs, character matrix)
-    await writer.saveNewTruthFiles(bookDir, output);
+    finalWordCount = persistenceOutput.wordCount;
+    const pipelineLang = book.language ?? gp.language;
+    await writer.saveChapter(bookDir, persistenceOutput, gp.numericalSystem, pipelineLang);
+    await writer.saveNewTruthFiles(bookDir, persistenceOutput);
 
     // 5. Update chapter index
     const existingIndex = await this.state.loadChapterIndex(bookId);
     const now = new Date().toISOString();
     const newEntry: ChapterMeta = {
       number: chapterNumber,
-      title: output.title,
+      title: persistenceOutput.title,
       status: auditResult.passed ? "ready-for-review" : "audit-failed",
       wordCount: finalWordCount,
       createdAt: now,
@@ -739,7 +717,7 @@ export class PipelineRunner {
       await dispatchNotification(this.config.notifyChannels, {
         title: `${statusEmoji} ${book.title} 第${chapterNumber}章`,
         body: [
-          `**${output.title}** | ${finalWordCount}字`,
+          `**${persistenceOutput.title}** | ${finalWordCount}字`,
           revised ? "📝 已自动修正" : "",
           `审稿: ${auditResult.passed ? "通过" : "需人工审核"}`,
           ...auditResult.issues
@@ -752,7 +730,7 @@ export class PipelineRunner {
     }
 
     await this.emitWebhook("pipeline-complete", bookId, chapterNumber, {
-      title: output.title,
+      title: persistenceOutput.title,
       wordCount: finalWordCount,
       passed: auditResult.passed,
       revised,
@@ -760,7 +738,7 @@ export class PipelineRunner {
 
     return {
       chapterNumber,
-      title: output.title,
+      title: persistenceOutput.title,
       wordCount: finalWordCount,
       auditResult,
       revised,
@@ -1086,6 +1064,35 @@ ${matrix}`,
       promptTokens: a.promptTokens + b.promptTokens,
       completionTokens: a.completionTokens + b.completionTokens,
       totalTokens: a.totalTokens + b.totalTokens,
+    };
+  }
+
+  private async buildPersistenceOutput(
+    bookId: string,
+    book: BookConfig,
+    bookDir: string,
+    chapterNumber: number,
+    output: WriteChapterOutput,
+    finalContent: string,
+  ): Promise<WriteChapterOutput> {
+    if (finalContent === output.content) {
+      return output;
+    }
+
+    const analyzer = new ChapterAnalyzerAgent(this.agentCtxFor("chapter-analyzer", bookId));
+    const analyzed = await analyzer.analyzeChapter({
+      book,
+      bookDir,
+      chapterNumber,
+      chapterContent: finalContent,
+      chapterTitle: output.title,
+    });
+
+    return {
+      ...analyzed,
+      postWriteErrors: [],
+      postWriteWarnings: [],
+      tokenUsage: output.tokenUsage,
     };
   }
 

@@ -1,0 +1,260 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PipelineRunner } from "../pipeline/runner.js";
+import { StateManager } from "../state/manager.js";
+import { WriterAgent, type WriteChapterOutput } from "../agents/writer.js";
+import { ContinuityAuditor, type AuditIssue, type AuditResult } from "../agents/continuity.js";
+import { ReviserAgent, type ReviseOutput } from "../agents/reviser.js";
+import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
+import type { BookConfig } from "../models/book.js";
+
+const ZERO_USAGE = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+} as const;
+
+const CRITICAL_ISSUE: AuditIssue = {
+  severity: "critical",
+  category: "continuity",
+  description: "Fix the chapter state",
+  suggestion: "Repair the contradiction",
+};
+
+function createAuditResult(overrides: Partial<AuditResult>): AuditResult {
+  return {
+    passed: true,
+    issues: [],
+    summary: "ok",
+    tokenUsage: ZERO_USAGE,
+    ...overrides,
+  };
+}
+
+function createWriterOutput(overrides: Partial<WriteChapterOutput> = {}): WriteChapterOutput {
+  return {
+    chapterNumber: 1,
+    title: "Test Chapter",
+    content: "Original chapter body.",
+    wordCount: "Original chapter body.".length,
+    preWriteCheck: "check",
+    postSettlement: "settled",
+    updatedState: "writer state",
+    updatedLedger: "writer ledger",
+    updatedHooks: "writer hooks",
+    chapterSummary: "| 1 | Original summary |",
+    updatedSubplots: "writer subplots",
+    updatedEmotionalArcs: "writer emotions",
+    updatedCharacterMatrix: "writer matrix",
+    postWriteErrors: [],
+    postWriteWarnings: [],
+    tokenUsage: ZERO_USAGE,
+    ...overrides,
+  };
+}
+
+function createReviseOutput(overrides: Partial<ReviseOutput> = {}): ReviseOutput {
+  return {
+    revisedContent: "Revised chapter body.",
+    wordCount: "Revised chapter body.".length,
+    fixedIssues: ["fixed"],
+    updatedState: "revised state",
+    updatedLedger: "revised ledger",
+    updatedHooks: "revised hooks",
+    tokenUsage: ZERO_USAGE,
+    ...overrides,
+  };
+}
+
+function createAnalyzedOutput(overrides: Partial<WriteChapterOutput> = {}): WriteChapterOutput {
+  return createWriterOutput({
+    content: "Analyzed final chapter body.",
+    wordCount: "Analyzed final chapter body.".length,
+    updatedState: "analyzed state",
+    updatedLedger: "analyzed ledger",
+    updatedHooks: "analyzed hooks",
+    chapterSummary: "| 1 | Revised summary |",
+    updatedSubplots: "analyzed subplots",
+    updatedEmotionalArcs: "analyzed emotions",
+    updatedCharacterMatrix: "analyzed matrix",
+    ...overrides,
+  });
+}
+
+async function createRunnerFixture(): Promise<{
+  root: string;
+  runner: PipelineRunner;
+  state: StateManager;
+  bookId: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "inkos-runner-test-"));
+  const state = new StateManager(root);
+  const bookId = "test-book";
+  const now = "2026-03-19T00:00:00.000Z";
+  const book: BookConfig = {
+    id: bookId,
+    title: "Test Book",
+    platform: "tomato",
+    genre: "xuanhuan",
+    status: "active",
+    targetChapters: 10,
+    chapterWordCount: 3000,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await state.saveBookConfig(bookId, book);
+  await mkdir(join(state.bookDir(bookId), "story"), { recursive: true });
+  await mkdir(join(state.bookDir(bookId), "chapters"), { recursive: true });
+
+  const runner = new PipelineRunner({
+    client: {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: false,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+      },
+    } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+    model: "test-model",
+    projectRoot: root,
+  });
+
+  return { root, runner, state, bookId };
+}
+
+describe("PipelineRunner", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("uses the latest revised content as the input for follow-up spot-fix revisions", async () => {
+    const { root, runner, bookId } = await createRunnerFixture();
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        content: "Original draft body.",
+        wordCount: "Original draft body.".length,
+        postWriteErrors: [
+          {
+            severity: "error",
+            rule: "post-write",
+            description: "Needs a deterministic fix",
+            suggestion: "Repair the line",
+          },
+        ],
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        issues: [CRITICAL_ISSUE],
+        summary: "needs another revision",
+      }))
+      .mockResolvedValueOnce(createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }));
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter")
+      .mockResolvedValueOnce(createReviseOutput({
+        revisedContent: "After first fix.",
+        wordCount: "After first fix.".length,
+      }))
+      .mockResolvedValueOnce(createReviseOutput({
+        revisedContent: "After second fix.",
+        wordCount: "After second fix.".length,
+      }));
+    vi.spyOn(WriterAgent.prototype, "saveChapter").mockResolvedValue(undefined);
+    vi.spyOn(WriterAgent.prototype, "saveNewTruthFiles").mockResolvedValue(undefined);
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        content: "After second fix.",
+        wordCount: "After second fix.".length,
+      }),
+    );
+
+    await runner.writeNextChapter(bookId);
+
+    expect(reviseChapter).toHaveBeenCalledTimes(2);
+    expect(reviseChapter.mock.calls[1]?.[1]).toBe("After first fix.");
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("persists truth files derived from the final revised chapter", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        content: "Original draft body.",
+        wordCount: "Original draft body.".length,
+        updatedState: "original state",
+        updatedLedger: "original ledger",
+        updatedHooks: "original hooks",
+        chapterSummary: "| 1 | Original summary |",
+        updatedSubplots: "original subplots",
+        updatedEmotionalArcs: "original emotions",
+        updatedCharacterMatrix: "original matrix",
+        postWriteErrors: [
+          {
+            severity: "error",
+            rule: "post-write",
+            description: "Needs a deterministic fix",
+            suggestion: "Repair the line",
+          },
+        ],
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: "Final revised body.",
+        wordCount: "Final revised body.".length,
+      }),
+    );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        content: "Final revised body.",
+        wordCount: "Final revised body.".length,
+        updatedState: "final analyzed state",
+        updatedLedger: "final analyzed ledger",
+        updatedHooks: "final analyzed hooks",
+        chapterSummary: "| 1 | Final analyzed summary |",
+        updatedSubplots: "final analyzed subplots",
+        updatedEmotionalArcs: "final analyzed emotions",
+        updatedCharacterMatrix: "final analyzed matrix",
+      }),
+    );
+
+    await runner.writeNextChapter(bookId);
+
+    const storyDir = join(state.bookDir(bookId), "story");
+    await expect(readFile(join(storyDir, "current_state.md"), "utf-8"))
+      .resolves.toContain("final analyzed state");
+    await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8"))
+      .resolves.toContain("final analyzed hooks");
+    await expect(readFile(join(storyDir, "particle_ledger.md"), "utf-8"))
+      .resolves.toContain("final analyzed ledger");
+    await expect(readFile(join(storyDir, "chapter_summaries.md"), "utf-8"))
+      .resolves.toContain("Final analyzed summary");
+    await expect(readFile(join(storyDir, "subplot_board.md"), "utf-8"))
+      .resolves.toContain("final analyzed subplots");
+    await expect(readFile(join(storyDir, "emotional_arcs.md"), "utf-8"))
+      .resolves.toContain("final analyzed emotions");
+    await expect(readFile(join(storyDir, "character_matrix.md"), "utf-8"))
+      .resolves.toContain("final analyzed matrix");
+
+    await rm(root, { recursive: true, force: true });
+  });
+});
