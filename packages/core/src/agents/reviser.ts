@@ -71,6 +71,7 @@ export class ReviserAgent extends BaseAgent {
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
       lengthSpec?: LengthSpec;
+      externalContext?: string;
     },
   ): Promise<ReviseOutput> {
     const [currentState, ledger, hooks, styleGuideRaw, volumeOutline, storyBible, characterMatrix, chapterSummaries, parentCanon, fanficCanon] = await Promise.all([
@@ -234,11 +235,18 @@ ${outputFormat}`;
       ? `\n## 文风指南\n${styleGuide}`
       : "";
 
+    const contextBlock = options?.externalContext
+      ? `\n## 外部指令
+以下是来自外部系统的创作指令，请在本章修稿中融入：
+
+${options.externalContext}\n`
+      : "";
+
     const userPrompt = `请修正第${chapterNumber}章。
 
 ## 审稿问题
 ${issueList}
-
+${contextBlock}
 ## 当前状态卡
 ${currentState}
 ${ledgerBlock}
