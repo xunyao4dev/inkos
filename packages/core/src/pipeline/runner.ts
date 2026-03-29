@@ -682,7 +682,7 @@ export class PipelineRunner {
           : undefined,
       });
 
-      if (preRevision.blockingCount === 0 && preRevision.aiTellCount === 0) {
+      if (preRevision.blockingCount === 0 && preRevision.aiTellCount === 0 && !externalContext?.trim()) {
         return {
           chapterNumber: targetChapter,
           wordCount: countChapterLength(content, countingMode),
@@ -785,12 +785,18 @@ export class PipelineRunner {
       const improvedBlocking = effectivePostRevision.blockingCount < preRevision.blockingCount;
       const improvedAITells = effectivePostRevision.aiTellCount < preRevision.aiTellCount;
       const blockingDidNotWorsen = effectivePostRevision.blockingCount <= preRevision.blockingCount;
-      const criticalDidNotWorsen = effectivePostRevision.criticalCount <= preRevision.criticalCount;
+      const isMajorExpansion = normalizedRevision.wordCount > revisionBaseCount * 1.15;
+      const criticalDidNotWorsen = (externalContext?.trim() && isMajorExpansion)
+        ? effectivePostRevision.criticalCount <= Math.max(preRevision.criticalCount, 1)
+        : effectivePostRevision.criticalCount <= preRevision.criticalCount;
+
       const aiDidNotWorsen = effectivePostRevision.aiTellCount <= preRevision.aiTellCount;
-      const shouldApplyRevision = blockingDidNotWorsen
-        && criticalDidNotWorsen
-        && aiDidNotWorsen
-        && (improvedBlocking || improvedAITells);
+      const shouldApplyRevision = externalContext?.trim()
+        ? criticalDidNotWorsen
+        : (blockingDidNotWorsen
+          && criticalDidNotWorsen
+          && aiDidNotWorsen
+          && (improvedBlocking || improvedAITells));
 
       if (!shouldApplyRevision) {
         return {
@@ -799,7 +805,9 @@ export class PipelineRunner {
           fixedIssues: [],
           applied: false,
           status: "unchanged",
-          skippedReason: "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.",
+          skippedReason: externalContext?.trim()
+            ? `Critical issues worsened during manual revision (Critical: ${preRevision.criticalCount} -> ${effectivePostRevision.criticalCount}).`
+            : "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.",
         };
       }
       this.logLengthWarnings(lengthWarnings);

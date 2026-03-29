@@ -82,10 +82,13 @@ writeCommand
   .argument("<args...>", "Book ID (optional) and chapter number")
   .option("--force", "Skip confirmation prompt")
   .option("--words <n>", "Words per chapter (overrides book config)")
+  .option("--context <text>", "Creative guidance (natural language)")
+  .option("--context-file <path>", "Read guidance from file")
   .option("--json", "Output JSON")
   .action(async (args: ReadonlyArray<string>, opts) => {
     try {
       const root = findProjectRoot();
+      const context = await resolveContext(opts);
 
       let bookId: string;
       let chapter: number;
@@ -159,7 +162,7 @@ writeCommand
       const wordCount = opts.words ? parseInt(opts.words, 10) : undefined;
 
       const config = await loadConfig();
-      const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
+      const pipeline = new PipelineRunner(buildPipelineConfig(config, root, { externalContext: context }));
 
       const result = await pipeline.writeNextChapter(bookId, wordCount);
       const book = await state.loadBookConfig(bookId);
