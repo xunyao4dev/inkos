@@ -84,13 +84,25 @@ chmod +x dist/inkos
 
 echo "✅ Standalone binary successfully generated at dist/inkos"
 
-# 10. Link to /usr/local/bin
-echo "🔗 Linking to /usr/local/bin/inkos..."
-if [ -w /usr/local/bin ]; then
-    ln -sf "$PROJECT_ROOT/dist/inkos" /usr/local/bin/inkos
-    echo "🎉 Successfully linked! You can now run 'inkos' directly anywhere."
+# 10. Link to user's local bin directory
+USER_BIN="$HOME/.local/bin"
+echo "🔗 Linking to $USER_BIN/inkos..."
+
+# Create ~/.local/bin if it doesn't exist
+mkdir -p "$USER_BIN"
+
+ln -sf "$PROJECT_ROOT/dist/inkos" "$USER_BIN/inkos"
+echo "🎉 Successfully linked!"
+
+# Check if ~/.local/bin is in PATH
+if [[ ":$PATH:" != *":$USER_BIN:"* ]]; then
+    echo ""
+    echo "⚠️  Warning: $USER_BIN is not in your PATH."
+    echo "   Add the following line to your ~/.zshrc or ~/.bashrc:"
+    echo ""
+    echo "   export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo ""
+    echo "   Then run: source ~/.zshrc (or ~/.bashrc)"
 else
-    echo "🔒 Requires sudo to link to /usr/local/bin. Running with sudo..."
-    sudo ln -sf "$PROJECT_ROOT/dist/inkos" /usr/local/bin/inkos
-    echo "🎉 Successfully linked! You can now run 'inkos' directly anywhere."
+    echo "   You can now run 'inkos' directly anywhere."
 fi
